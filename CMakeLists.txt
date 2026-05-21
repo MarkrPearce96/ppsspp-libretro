@@ -3294,3 +3294,10 @@ if(UNIX AND NOT ANDROID AND NOT APPLE)
 		DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/mime/packages"
 	)
 endif()
+
+# RetroNest fork — sibling directory for RetroNest-specific libretro
+# extensions. Gated on -DENABLE_RETRONEST=ON (off by default).
+option(ENABLE_RETRONEST "Build RetroNest-specific libretro extensions" OFF)
+if(ENABLE_RETRONEST)
+	add_subdirectory(ppsspp-libretro)
+endif()

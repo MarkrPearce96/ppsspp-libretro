@@ -1,3 +1,21 @@
+# ppsspp-libretro (RetroNest fork)
+
+> This is a fork of [PPSSPP](https://github.com/hrydgard/ppsspp) that builds a
+> [libretro](https://www.libretro.com) core for use inside
+> [RetroNest](https://github.com/markrpearce96/RetroNest). The upstream
+> PPSSPP README follows below.
+>
+> - **Releases:** Pre-built macOS universal cores at the [Releases tab](https://github.com/markrpearce96/ppsspp-libretro/releases) (once CI lands — see task #5 in the project memory).
+> - **Building locally:** `cmake -S . -B build-libretro -DLIBRETRO=ON -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_BUILD_TYPE=Release && cmake --build build-libretro --target ppsspp_libretro -j`
+> - **License:** GPL-2.0+, inherited from PPSSPP.
+>
+> All RetroNest-specific code lives in the `ppsspp-libretro/` directory
+> (sibling of upstream's `libretro/`). Upstream files are untouched except
+> for a 6-line conditional at the bottom of the top-level `CMakeLists.txt`
+> and this fork-notice block.
+
+---
+
 PPSSPP - a fast and portable PSP emulator
 =========================================
 
