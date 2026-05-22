@@ -27,10 +27,12 @@ jobs:
   build:
     name: Build macOS universal (arm64 + x86_64)
     runs-on: macos-14
-    # 60 min is generous — local universal builds finish in ~5 min on M-series;
-    # GitHub's runner is slower but nowhere near PCSX2's Rosetta-translated
-    # x86_64 timing (which justifies their 120 min budget).
-    timeout-minutes: 60
+    # 120 min matches pcsx2-libretro. First-run universal builds on
+    # GitHub's macos-14 runner (3 cores, ~7GB RAM) blew through 60 min
+    # because PPSSPP compiles every source twice for universal AND its
+    # GPU subsystem is large. Ninja + explicit -j cap below help, but
+    # the timeout still needs the headroom.
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,19 +46,28 @@ jobs:
           # vendored as submodules or in-tree). sdl2 is here because
           # upstream's CMake configure references it for the standalone
           # PPSSPP target even when we only build the libretro target.
+          # ninja is the generator below — finishes the build in less
+          # wall-time than Make on the same runner because its scheduler
+          # is more deterministic about parallelism.
           brew update
-          brew install cmake sdl2
+          brew install cmake ninja sdl2
 
-      - name: Configure (CMake universal)
+      - name: Configure (CMake universal, Ninja)
         run: |
           cmake -S . -B build \
+            -G Ninja \
             -DLIBRETRO=ON \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build ppsspp_libretro target
         run: |
-          cmake --build build --target ppsspp_libretro -j
+          # Cap -j at the actual core count. With bare `-j` the build can
+          # over-subscribe on a 3-core / 7GB runner and thrash memory,
+          # which is what timed out the first attempt at this workflow.
+          NCPU=$(sysctl -n hw.ncpu)
+          echo "Building with -j$NCPU on $(uname -m) ($(sysctl -n hw.memsize | awk '{printf "%.1f GB", $1/1024/1024/1024}') RAM)"
+          cmake --build build --target ppsspp_libretro -j "$NCPU"
 
       - name: Verify universal binary + libretro symbols
         run: |
