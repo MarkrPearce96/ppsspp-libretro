@@ -1,0 +1,190 @@
+name: libretro_release
+
+# Builds the ppsspp-libretro core on tag push and publishes a GitHub Release
+# with the macOS universal (arm64 + x86_64) dylib + PPSSPP assets packaged as
+# a single zip.
+#
+# Mirrors pcsx2-libretro's libretro_release.yml — but simpler, because:
+#   1. PPSSPP's libretro dylib links no brew dependencies (everything is
+#      statically linked / vendored), so we don't need the x86_64 Rosetta
+#      Homebrew dance PCSX2 uses. Universal is just one CMake flag.
+#   2. No Metal shaders to compile (PPSSPP is GL-only).
+#
+# Assets at upstream's `assets/` directory are packaged inside
+# `ppsspp_libretro_resources/PPSSPP/` so the PpssppLibretroAdapter on the
+# RetroNest side can point libretro's system_dir at the resources folder
+# and PPSSPP libretro's `<system_dir>/PPSSPP/` lookup resolves to it.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # required for softprops/action-gh-release to create releases
+
+jobs:
+  build:
+    name: Build macOS universal (arm64 + x86_64)
+    runs-on: macos-14
+    # 60 min is generous — local universal builds finish in ~5 min on M-series;
+    # GitHub's runner is slower but nowhere near PCSX2's Rosetta-translated
+    # x86_64 timing (which justifies their 120 min budget).
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Homebrew dependencies
+        run: |
+          # cmake is the only hard dep — the libretro target links no brew
+          # libraries (ffmpeg + libpng + zstd + rcheevos + libchdr are all
+          # vendored as submodules or in-tree). sdl2 is here because
+          # upstream's CMake configure references it for the standalone
+          # PPSSPP target even when we only build the libretro target.
+          brew update
+          brew install cmake sdl2
+
+      - name: Configure (CMake universal)
+        run: |
+          cmake -S . -B build \
+            -DLIBRETRO=ON \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build ppsspp_libretro target
+        run: |
+          cmake --build build --target ppsspp_libretro -j
+
+      - name: Verify universal binary + libretro symbols
+        run: |
+          set -euo pipefail
+          DYLIB=build/lib/ppsspp_libretro.dylib
+          test -f "$DYLIB"
+          file "$DYLIB"
+          # Must contain BOTH slices — RetroNest's universal-only policy.
+          lipo -info "$DYLIB"
+          lipo -info "$DYLIB" | grep -qE "(arm64 x86_64|x86_64 arm64)"
+          # Must export the libretro entry points — quick sanity vs an
+          # empty / mis-linked dylib.
+          RETRO_COUNT=$(nm -gU "$DYLIB" 2>/dev/null | grep -c '_retro_' || true)
+          echo "Found $RETRO_COUNT exported _retro_* symbols"
+          test "$RETRO_COUNT" -ge 20
+
+      - name: Upload dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppsspp_libretro-dylib
+          path: build/lib/ppsspp_libretro.dylib
+          if-no-files-found: error
+
+      - name: Upload PPSSPP runtime assets artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppsspp_libretro-assets
+          # Upstream's full assets/ tree — fonts, compat.ini, atlases,
+          # localization, adhoc server list, ui images. ~22 MB. Cheaper
+          # to ship the lot than curate which subset the libretro path
+          # actually reads.
+          path: assets/
+          if-no-files-found: error
+
+  release:
+    name: Package and publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for SHA lookup)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download dylib artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ppsspp_libretro-dylib
+          path: stage/
+
+      - name: Download assets artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ppsspp_libretro-assets
+          # Land assets inside ppsspp_libretro_resources/PPSSPP/ so the
+          # final extract layout matches PPSSPP libretro's runtime
+          # convention (<system_dir>/PPSSPP/<files>).
+          path: stage/ppsspp_libretro_resources/PPSSPP/
+
+      - name: Fetch upstream master (for SHA lookup)
+        run: |
+          git remote add upstream https://github.com/hrydgard/ppsspp.git
+          # Full fetch so merge-base finds the real rebase point regardless
+          # of how far upstream has advanced since our last rebase.
+          git fetch upstream master
+
+      - name: Compute version metadata
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          FORK_SHA="$(git rev-parse HEAD)"
+          # upstream_sha: merge-base of HEAD and upstream/master is the
+          # upstream tip we last rebased onto.
+          UPSTREAM_SHA="$(git merge-base HEAD upstream/master)"
+          UPSTREAM_SHORT="$(echo "$UPSTREAM_SHA" | cut -c1-7)"
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "tag=$TAG"
+            echo "platform=macos-universal"
+            echo "fork_sha=$FORK_SHA"
+            echo "upstream_sha=$UPSTREAM_SHA"
+            echo "upstream_ref=upstream/master"
+            echo "build_date=$BUILD_DATE"
+          } > stage/VERSION
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_short=$UPSTREAM_SHORT" >> "$GITHUB_OUTPUT"
+
+      - name: Verify staged contents
+        run: |
+          ls -la stage/
+          test -f stage/ppsspp_libretro.dylib
+          test -d stage/ppsspp_libretro_resources/PPSSPP
+          # Canary file PPSSPP libretro checks at runtime (libretro.cpp:1254
+          # — warns "Core system files missing" if compat.ini isn't found
+          # under <system_dir>/PPSSPP/).
+          test -f stage/ppsspp_libretro_resources/PPSSPP/compat.ini
+          test -f stage/ppsspp_libretro_resources/PPSSPP/flash0/font/ltn0.pgf
+          test -f stage/VERSION
+          cat stage/VERSION
+
+      - name: Create zip
+        run: |
+          cd stage
+          zip -r ../ppsspp_libretro.dylib.zip \
+            ppsspp_libretro.dylib \
+            ppsspp_libretro_resources \
+            VERSION
+          cd ..
+          ls -la ppsspp_libretro.dylib.zip
+          unzip -l ppsspp_libretro.dylib.zip | head -10
+
+      - name: Compose release body
+        run: |
+          {
+            echo "**Platform:** macOS universal (arm64 + x86_64)"
+            echo "**Upstream PPSSPP:** \`${{ steps.meta.outputs.upstream_short }}\` (master)"
+            echo ""
+            echo "## Changes since previous release"
+          } > release_body.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          body_path: release_body.md
+          # Auto-appends commit list below the body — handy for upstream
+          # rebase visibility on each release.
+          generate_release_notes: true
+          files: ppsspp_libretro.dylib.zip
+          fail_on_unmatched_files: true
