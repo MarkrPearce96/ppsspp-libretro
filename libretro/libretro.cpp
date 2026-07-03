@@ -72,7 +72,13 @@ static struct {
    int16_t *data;
    int32_t size;
    int32_t capacity;
-} output_audio_buffer = {NULL, 0, 0};
+} output_audio_buffer = {NULL, 0, 0}, upload_audio_buffer = {NULL, 0, 0};
+// ppsspp-libretro: output_audio_buffer is filled by System_AudioPushSamples()
+// on the emu thread (used with the GL backends) and drained on the libretro
+// thread in retro_run(), so every access must hold this mutex. The samples
+// are swapped into upload_audio_buffer for the audio_batch_cb() call so the
+// lock is never held while the frontend blocks for audio sync.
+static std::mutex output_audio_buffer_mutex;
 
 // Calculated swap interval is 'stable' if the same
 // value is recorded for a number of retro_run()
@@ -123,6 +129,7 @@ namespace Libretro
    static float runSpeed = 0.0f;
    static s64 runTicksLast = 0;
 
+   // Must be called with output_audio_buffer_mutex held.
    static void ensure_output_audio_buffer_capacity(int32_t capacity)
    {
       if (capacity <= output_audio_buffer.capacity) {
@@ -136,6 +143,7 @@ namespace Libretro
 
    static void init_output_audio_buffer(int32_t capacity)
    {
+      std::lock_guard<std::mutex> lock(output_audio_buffer_mutex);
       output_audio_buffer.data = NULL;
       output_audio_buffer.size = 0;
       output_audio_buffer.capacity = 0;
@@ -144,16 +152,28 @@ namespace Libretro
 
    static void free_output_audio_buffer()
    {
+      std::lock_guard<std::mutex> lock(output_audio_buffer_mutex);
       free(output_audio_buffer.data);
       output_audio_buffer.data = NULL;
       output_audio_buffer.size = 0;
       output_audio_buffer.capacity = 0;
+      free(upload_audio_buffer.data);
+      upload_audio_buffer.data = NULL;
+      upload_audio_buffer.size = 0;
+      upload_audio_buffer.capacity = 0;
    }
 
    static void upload_output_audio_buffer()
    {
-      audio_batch_cb(output_audio_buffer.data, output_audio_buffer.size / 2);
-      output_audio_buffer.size = 0;
+      // Swap out the accumulation buffer under the lock, then upload outside
+      // of it: audio_batch_cb() may block for frontend audio sync, and the
+      // emu thread must stay free to keep pushing samples meanwhile.
+      {
+         std::lock_guard<std::mutex> lock(output_audio_buffer_mutex);
+         std::swap(output_audio_buffer, upload_audio_buffer);
+      }
+      audio_batch_cb(upload_audio_buffer.data, upload_audio_buffer.size / 2);
+      upload_audio_buffer.size = 0;
    }
 
 
@@ -2049,10 +2069,11 @@ inline int16_t Clamp16(int32_t sample) {
 void System_AudioPushSamples(const int32_t *audio, int numSamples, float volume) {
    // We ignore volume here, because it's handled by libretro presumably.
 
-   // Convert to 16-bit audio for further processing.
+   // Convert to 16-bit audio and append it to the output buffer,
+   // (up to) 1024 frames at a time.
    int16_t buffer[1024 * 2];
-   int origSamples = numSamples * 2;
 
+   std::lock_guard<std::mutex> lock(output_audio_buffer_mutex);
    while (numSamples > 0) {
       int blockSize = std::min(1024, numSamples);
       for (int i = 0; i < blockSize; i++) {
@@ -2060,13 +2081,15 @@ void System_AudioPushSamples(const int32_t *audio, int numSamples, float volume)
          buffer[i * 2 + 1] = Clamp16(audio[i * 2 + 1]);
       }
 
+      int blockSamples = blockSize * 2;
+      if (output_audio_buffer.capacity - output_audio_buffer.size < blockSamples)
+         ensure_output_audio_buffer_capacity((output_audio_buffer.capacity + blockSamples) * 1.5);
+      memcpy(output_audio_buffer.data + output_audio_buffer.size, buffer, blockSamples * sizeof(*output_audio_buffer.data));
+      output_audio_buffer.size += blockSamples;
+
+      audio += blockSamples;
       numSamples -= blockSize;
    }
-
-   if (output_audio_buffer.capacity - output_audio_buffer.size < origSamples)
-      ensure_output_audio_buffer_capacity((output_audio_buffer.capacity + origSamples) * 1.5);
-   memcpy(output_audio_buffer.data + output_audio_buffer.size, buffer, origSamples * sizeof(*output_audio_buffer.data));
-   output_audio_buffer.size += origSamples;
 }
 
 void System_AudioGetDebugStats(char *buf, size_t bufSize) { if (buf) buf[0] = '\0'; }
