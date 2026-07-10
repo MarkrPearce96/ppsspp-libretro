@@ -36,6 +36,23 @@ automatically after a rebuild + re-probe. Two upstream key typos
 (`ppsspp_mulitsample_level`, `ppsspp_hardware_tesselation`) are load-bearing
 — renaming them is a schema-breaking change, don't.
 
+## Updating from upstream (carries patches — a sync is real work)
+Unlike the stock `mgba-libretro` mirror, this fork carries RetroNest source
+patches, so an upstream sync **can conflict**. `upstream` = `hrydgard/ppsspp`,
+branch `main`, release arch **universal**.
+```sh
+git fetch upstream
+git merge upstream/master        # resolve conflicts where upstream touched
+                                 # the same code as our patches
+# REBUILD LOCALLY + TEST IN RETRONEST — not just "compiles": confirm rendering,
+# audio, settings schema still work. Watch the two load-bearing upstream key
+# typos (see Settings options) — don't let a sync "fix" them.
+git push origin main
+git tag v2026.MM.DD && git push origin v2026.MM.DD   # CI rebuilds + republishes
+```
+Only sync when you actually want an upstream fix/feature — each sync costs
+conflict-resolution + a full retest. Upstreaming patches (below) shrinks this.
+
 ## Branches worth knowing
 - `osd-options` — preserved pre-review OSD work.
 - `upstream-pr-*` — branches staged for upstream PRs; submit via the TRUE
